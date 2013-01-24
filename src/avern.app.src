@@ -1,0 +1,8 @@
+{application, avern, [
+  {description, ""},
+  {vsn, git},
+  {registered, [avern_queue_sup, avern_encoding, avern_udp]},
+  {applications, [kernel, stdlib]},
+  {mod, {avern_app, []}},
+  {env, []}
+ ]}.
