@@ -42,7 +42,10 @@ init([]) ->
                     permanent, 5000, worker, [avern_encoding]},
                 {avern_udp,
                     {avern_udp, start_link, []},
-                    permanent, 5000, worker, [avern_udp]}
+                    permanent, 5000, worker, [avern_udp]},
+                {avern_scheduler,
+                    {avern_scheduler, start_link, []},
+                    permanent, 5000, worker, [avern_scheduler]}
             ]}};
          Else ->
             io:format("Failed to open LevelDB: ~p~n", [Else]),
