@@ -70,8 +70,8 @@ handle_call({read, From, To}, _From, #st{metric=Metric, leveldb=LevelDB}=St) ->
     %% TODO: read from queue cache.
     DiskRows = read_from_disk(Metric, From, To, LevelDB),
     {reply, {ok, DiskRows}, St};
-handle_call(flush, _From, #st{data=Data, leveldb=LevelDB}=St) ->
-    Operations = format_writes(Data),
+handle_call(flush, _From, #st{metric=Metric, data=Data, leveldb=LevelDB}=St) ->
+    Operations = format_writes(Metric, Data),
     Ref = proplists:get_value(ref, LevelDB),
     WriteOpts = proplists:get_value(write_opts, LevelDB),
     case eleveldb:write(Ref, Operations, WriteOpts) of
@@ -86,11 +86,9 @@ handle_call(flush, _From, #st{data=Data, leveldb=LevelDB}=St) ->
 handle_call(Msg, _From, St) ->
     {stop, {unknown_call, Msg}, error, St}.
 
-handle_cast({update, Timestamp, Value, Tags}, St) ->
-    Key = avern_encoding:encode_object_key(St#st.metric, Timestamp, Tags),
-    EncodedValue = avern_encoding:encode_object_value(Value),
-    Data = gb_sets:add({Key, EncodedValue}, St#st.data),
-    {noreply, St#st{data=Data}, 0};
+handle_cast({update, Timestamp, Value, Tags}, #st{data=Data}=St) ->
+    Data1 = gb_sets:add({{Timestamp, Tags}, Value}, Data),
+    {noreply, St#st{data=Data1}, 0};
 handle_cast(Msg, St) ->
     {stop, {unknown_cast, Msg}, St}.
 
@@ -131,13 +129,18 @@ read_from_disk(Metric, From, To, LevelDB) ->
         {break, Acc} -> Acc
     end.
 
--spec format_writes(gb_set()) -> list().
-format_writes(Data) ->
-    format_writes(Data, []).
+-spec format_writes(binary(), gb_set()) -> list().
+format_writes(Metric, Data) ->
+    format_writes(Metric, Data, []).
 
--spec format_writes(gb_set(), list()) -> list().
-format_writes({0, nil}, Operations) ->
-    Operations;
-format_writes(Data, Operations) ->
-    {{Key, Value}, Data1} = gb_sets:take_smallest(Data),
-    format_writes(Data1, [{put, Key, Value}|Operations]).
+-spec format_writes(binary(), gb_set(), list()) -> list().
+format_writes(Metric, Data, Operations) ->
+    case gb_sets:is_empty(Data) of
+        true ->
+            Operations;
+        false ->
+            {{{Timestamp, Tags}, Value}, Data1} = gb_sets:take_smallest(Data),
+            Key = avern_encoding:encode_object_key(Metric, Timestamp, Tags),
+            EncodedValue = avern_encoding:encode_object_value(Value),
+            format_writes(Metric, Data1, [{put, Key, EncodedValue}|Operations])
+    end.
