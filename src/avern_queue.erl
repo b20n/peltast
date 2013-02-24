@@ -66,10 +66,17 @@ init({LevelDB, Metric}) ->
         last_flush = 0
     }}.
 
-handle_call({read, From, To}, _From, #st{metric=Metric, leveldb=LevelDB}=St) ->
-    %% TODO: read from queue cache.
-    DiskRows = read_from_disk(Metric, From, To, LevelDB),
-    {reply, {ok, DiskRows}, St};
+handle_call({read, From, To}, _From, State) ->
+    #st{
+        metric = Metric,
+        data = Data,
+        leveldb = LevelDB
+    } = State,
+    Disk = read_from_disk(Metric, From, To, LevelDB),
+    Cache = read_from_cache(Metric, From, To, Data),
+    {_, FilteredDisk} = proplists:split(Disk, proplists:get_keys(Cache)),
+    Final = lists:sort(FilteredDisk ++ Cache),
+    {reply, {ok, Final}, State};
 handle_call(flush, _From, #st{metric=Metric, data=Data, leveldb=LevelDB}=St) ->
     Operations = format_writes(Metric, Data),
     Ref = proplists:get_value(ref, LevelDB),
@@ -128,6 +135,20 @@ read_from_disk(Metric, From, To, LevelDB) ->
     catch
         {break, Acc} -> Acc
     end.
+
+read_from_cache(Metric, From, To, Data) ->
+    Filtered = gb_sets:filter(
+        fun({{Timestamp, _}, _}) ->
+            Timestamp >= From andalso Timestamp =< To
+        end,
+        Data
+    ),
+    lists:map(
+        fun({{Timestamp, Tags}, Value}) ->
+            {{Metric, Timestamp, Tags}, Value}
+        end,
+        gb_sets:to_list(Filtered)
+    ).
 
 -spec format_writes(binary(), gb_set()) -> list().
 format_writes(Metric, Data) ->

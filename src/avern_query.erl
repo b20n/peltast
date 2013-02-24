@@ -19,7 +19,7 @@ filter_and_group(RawData, QueryTags) ->
     end,
     Results = lists:foldl(Folder, orddict:new(), RawData),
     lists:map(
-        fun({Group, Rows}) -> {Group, Rows} end,
+        fun({Group, Rows}) -> {Group, lists:reverse(Rows)} end,
         orddict:to_list(Results)
     ).
 
