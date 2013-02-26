@@ -7,7 +7,14 @@
         avern_udp,
         avern_scheduler
     ]},
-    {applications, [kernel, stdlib]},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        mochiweb,
+        webmachine,
+        folsom
+    ]},
     {mod, {avern_app, []}},
     {env, []}
 ]}.

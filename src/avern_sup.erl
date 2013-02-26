@@ -7,6 +7,21 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
+    % Webmachine
+    WebIP = case application:get_env(avern, web_ip) of
+        {ok, IP} -> IP;
+        undefined -> {0, 0, 0, 0}
+    end,
+    WebPort = case application:get_env(avern, web_port) of
+        {ok, Port} -> Port;
+        undefined -> 12068
+    end,
+    {ok, Dispatch} = file:consult(filename:join([
+        filename:dirname(code:which(?MODULE)),
+        "..", "priv", "dispatch.conf"
+    ])),
+    WebConfig = [{ip, WebIP}, {port, WebPort}, {dispatch, Dispatch}],
+    % LevelDB
     LevelDBOpts = [
         {create_if_missing, true},
         {write_buffer_size, 60 * 1024 * 1024},
@@ -45,7 +60,10 @@ init([]) ->
                     permanent, 5000, worker, [avern_udp]},
                 {avern_scheduler,
                     {avern_scheduler, start_link, []},
-                    permanent, 5000, worker, [avern_scheduler]}
+                    permanent, 5000, worker, [avern_scheduler]},
+                {webmachine_mochiweb,
+                    {webmachine_mochiweb, start, [WebConfig]},
+                    permanent, 5000, worker, [webmachine_mochiweb]}
             ]}};
          Else ->
             io:format("Failed to open LevelDB: ~p~n", [Else]),

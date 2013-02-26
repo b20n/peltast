@@ -83,9 +83,7 @@ handle_call(flush, _From, #st{metric=Metric, data=Data, leveldb=LevelDB}=St) ->
     WriteOpts = proplists:get_value(write_opts, LevelDB),
     case eleveldb:write(Ref, Operations, WriteOpts) of
         ok ->
-            {Megaseconds, Seconds, _} = erlang:now(),
-            Epoch = Megaseconds * 1000000 + Seconds,
-            {reply, ok, St#st{data=gb_sets:new(), last_flush=Epoch}};
+            {reply, ok, St#st{data=gb_sets:new(), last_flush=avern_util:now()}};
         {error, Reason} ->
             %% TODO: logme
             {reply, {error, Reason}, St#st{data=Data}}
@@ -100,9 +98,7 @@ handle_cast(Msg, St) ->
     {stop, {unknown_cast, Msg}, St}.
 
 handle_info(timeout, #st{data=Data, last_flush=LastFlush, metric=Metric}=St) ->
-    {Megaseconds, Seconds, _} = erlang:now(),
-    Epoch = Megaseconds * 1000000 + Seconds,
-    DeltaT = Epoch - LastFlush,
+    DeltaT = avern_util:now() - LastFlush,
     avern_scheduler:schedule(Metric, gb_trees:size(Data), DeltaT),
     {noreply, St};
 handle_info(Msg, St) ->
@@ -125,9 +121,8 @@ read_from_disk(Metric, From, To, LevelDB) ->
             {ok, {Metric, Timestamp, Tags}} when Timestamp =< To ->
                 Value = avern_encoding:decode_object_value(EncodedValue),
                 [{{Metric, Timestamp, Tags}, Value}|Acc];
-            {ok, {Metric, _, _}} ->
-                throw({break, Acc});
-            _ -> Acc
+            _ ->
+                throw({break, Acc})
         end
     end,
     try

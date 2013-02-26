@@ -4,7 +4,7 @@
 
 -define(SOCKOPTS, [binary, {reuseaddr, true}, {active, false}]).
 -define(MAX_LENGTH, 1024).
--define(PROCESSING_BUFSIZE, 5).
+-define(PROCESSING_BUFSIZE, 100).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
