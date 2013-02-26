@@ -42,8 +42,8 @@ encode_object_key(Metric, Timestamp, Tags) ->
     end, <<>>, Tags),
     {ok, MetricID} = encode(metric, Metric),
     <<
-        Timestamp:32/unsigned-integer,
         MetricID:24/unsigned-integer,
+        Timestamp:32/unsigned-integer,
         TagIDs/binary
     >>.
 
@@ -52,8 +52,8 @@ encode_object_key(Metric, Timestamp, Tags) ->
 decode_object_key(BinaryKey) ->
     try
         <<
-            Timestamp:32/unsigned-integer,
             MetricID:24/unsigned-integer,
+            Timestamp:32/unsigned-integer,
             TagIDs/binary
         >> = BinaryKey,
         {ok, Metric} = decode(metric, MetricID),
