@@ -7,6 +7,7 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
+    init_metrics(),
     % Webmachine
     WebIP = case application:get_env(avern, web_ip) of
         {ok, IP} -> IP;
@@ -69,3 +70,12 @@ init([]) ->
             io:format("Failed to open LevelDB: ~p~n", [Else]),
             {error, Else}
     end.
+
+init_metrics() ->
+    folsom_metrics:new_histogram([avern, metric_decode_time]),
+    folsom_metrics:new_histogram([avern, write_latency]),
+    folsom_metrics:new_histogram([avern, write_size]),
+    folsom_metrics:new_meter([avern, incoming_metrics]),
+    folsom_metrics:new_meter([avern, successful_writes]),
+    folsom_metrics:new_counter([avern, failed_writes]),
+    ok.

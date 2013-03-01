@@ -20,6 +20,7 @@ process_metrics([L|Rest]) ->
     Timestamp = list_to_integer(binary_to_list(TimestampBin)),
     Value = binary_to_number(ValueBin),
     avern_queue:update(Metric, Timestamp, Value, Tags),
+    folsom_metrics:notify([avern, incoming_metrics], 1),
     process_metrics(Rest);
 process_metrics([]) ->
     ok.

@@ -78,14 +78,17 @@ handle_call({read, From, To}, _From, State) ->
     Final = lists:sort(FilteredDisk ++ Cache),
     {reply, {ok, Final}, State};
 handle_call(flush, _From, #st{metric=Metric, data=Data, leveldb=LevelDB}=St) ->
-    Operations = format_writes(Metric, Data),
-    Ref = proplists:get_value(ref, LevelDB),
-    WriteOpts = proplists:get_value(write_opts, LevelDB),
-    case eleveldb:write(Ref, Operations, WriteOpts) of
+    Start = erlang:now(),
+    case flush_to_disk(Metric, Data, LevelDB) of
         ok ->
+            Time = timer:now_diff(erlang:now(), Start),
+            Count = gb_sets:size(Data),
+            folsom_metrics:notify([avern, write_size], Count),
+            folsom_metrics:notify([avern, write_latency], Time),
+            folsom_metrics:notify([avern, successful_writes], Count),
             {reply, ok, St#st{data=gb_sets:new(), last_flush=avern_util:now()}};
         {error, Reason} ->
-            %% TODO: logme
+            folsom_metrics:notify([avern, failed_writes], {inc, 1}),
             {reply, {error, Reason}, St#st{data=Data}}
     end;
 handle_call(Msg, _From, St) ->
@@ -130,6 +133,12 @@ read_from_disk(Metric, From, To, LevelDB) ->
     catch
         {break, Acc} -> Acc
     end.
+
+flush_to_disk(Metric, Data, LevelDB) ->
+    Operations = format_writes(Metric, Data),
+    Ref = proplists:get_value(ref, LevelDB),
+    WriteOpts = proplists:get_value(write_opts, LevelDB),
+    eleveldb:write(Ref, Operations, WriteOpts).
 
 read_from_cache(Metric, From, To, Data) ->
     Filtered = gb_sets:filter(
