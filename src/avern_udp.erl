@@ -2,8 +2,8 @@
 
 -export([start_link/0, init/1]).
 
--define(SOCKOPTS, [binary, {reuseaddr, true}, {active, false}]).
--define(MAX_LENGTH, 1024).
+-define(SOCKOPTS, [binary, {active, false}, {recbuf, 128 * 1024 * 1024}]).
+-define(MAX_LENGTH, 2048).
 -define(PROCESSING_BUFSIZE, 100).
 
 start_link() ->
@@ -20,20 +20,22 @@ init([]) ->
     end,
     case gen_udp:open(Port, [{ip, Interface}|?SOCKOPTS]) of
         {ok, Socket} ->
+            {ok, [{recbuf, RecBuf}]} = inet:getopts(Socket, [recbuf]),
+            inet:setopts(Socket, [{buffer, RecBuf}]),
             proc_lib:init_ack({ok, self()}),
-            loop(Socket, []);
+            loop(Socket, [], 0);
         {error, Reason} ->
             {stop, Reason}
     end.
 
-loop(Socket, Buf) when length(Buf) =:= ?PROCESSING_BUFSIZE ->
+loop(Socket, Buf, N) when N >= ?PROCESSING_BUFSIZE ->
     % TODO: instrument me
     spawn(avern_worker, process, [Buf]),
-    loop(Socket, []);
-loop(Socket, Buf) ->
-    case gen_udp:recv(Socket, ?MAX_LENGTH, 10) of
+    loop(Socket, [], 0);
+loop(Socket, Buf, N) ->
+    case gen_udp:recv(Socket, ?MAX_LENGTH, 1000) of
         {ok, {_Address, _Port, Data}} ->
-            loop(Socket, [Data|Buf]);
+            loop(Socket, [Data|Buf], N + 1);
         {error, timeout} ->
-            loop(Socket, Buf)
+            loop(Socket, Buf, N)
     end.
