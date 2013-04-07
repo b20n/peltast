@@ -34,7 +34,7 @@ decode_object_value(EncodedValue) ->
     <<Value:64/signed-float>> = EncodedValue,
     Value.
 
--spec encode_object_key(binary(), pos_integer(), tags()) -> binary().
+-spec encode_object_key(binary(), integer(), tags()) -> binary().
 encode_object_key(Metric, Timestamp, Tags) ->
     TagIDs = lists:foldl(fun({TagKey, TagValue}, Acc) ->
         EncodedTag = encode_tag(TagKey, TagValue),

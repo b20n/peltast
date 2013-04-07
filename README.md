@@ -64,4 +64,3 @@ TODO: delete data from inactive metrics.
 ## Query interface
 
 ### WAT
-

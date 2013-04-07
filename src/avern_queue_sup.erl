@@ -5,7 +5,10 @@
 -export([start_link/1, init/1]).
 
 spawn_queue(Metric) ->
-    supervisor:start_child(?MODULE, [Metric]).
+    %% TODO: from a config file
+    DiskWindowSize = 86400,
+    MemoryWindowSize = 43200,
+    supervisor:start_child(?MODULE, [Metric, DiskWindowSize, MemoryWindowSize]).
 
 start_link(LevelDB) ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, LevelDB).

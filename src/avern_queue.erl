@@ -8,7 +8,7 @@
 ]).
 
 -export([
-    start_link/2,
+    start_link/4,
     init/1,
     handle_call/3,
     handle_cast/2,
@@ -22,9 +22,13 @@
 -record(st, {
     metric,
     data,
-    leveldb,
-    last_flush
+    latest_flush,
+    disk_window_size,
+    memory_window_size,
+    leveldb
 }).
+
+%% TODO: check if queries can be served entirely from RAM before hitting disk
 
 -spec update(binary(), pos_integer(), number(), tags()) -> ok.
 update(Metric, Timestamp, Value, Tags) ->
@@ -40,7 +44,7 @@ update(Metric, Timestamp, Value, Tags) ->
 flush(Metric) ->
     case gproc:where({n, l, Metric}) of
         undefined -> {error, unknown_metric};
-        Pid -> gen_server:call(Pid, flush)
+        Pid -> gen_server:cast(Pid, flush)
     end.
 
 -spec read(binary(), pos_integer(), pos_integer()) -> {ok, list()}.
@@ -53,17 +57,25 @@ read(Metric, From, To) ->
     end,
     gen_server:call(Pid, {read, From, To}).
 
-start_link(LevelDB, Metric) ->
-    gen_server:start_link(?MODULE, {LevelDB, Metric}, []).
+start_link(LevelDB, Metric, DiskWindowSize, MemoryWindowSize) ->
+    gen_server:start_link(
+        ?MODULE, {LevelDB, Metric, DiskWindowSize, MemoryWindowSize}, []
+    ).
 
-init({LevelDB, Metric}) ->
+init({LevelDB, Metric, DiskWindowSize, MemoryWindowSize}) ->
     gproc:reg({n, l, Metric}, ignored),
+    process_flag(trap_exit, true),
+    {ok, Period} = avern_scheduler:schedule(),
+    timer:send_after(Period, self(), cleanup),
+    timer:send_after(Period, self(), flush),
     Data = gb_sets:new(),
     {ok, #st{
         metric = Metric,
         data = Data,
-        leveldb = LevelDB,
-        last_flush = 0
+        latest_flush = 0,
+        disk_window_size = DiskWindowSize,
+        memory_window_size = MemoryWindowSize,
+        leveldb = LevelDB
     }}.
 
 handle_call({read, From, To}, _From, State) ->
@@ -72,73 +84,65 @@ handle_call({read, From, To}, _From, State) ->
         data = Data,
         leveldb = LevelDB
     } = State,
-    Disk = read_from_disk(Metric, From, To, LevelDB),
+    Disk = avern_leveldb:read(Metric, From, To, LevelDB),
     Cache = read_from_cache(Metric, From, To, Data),
     {_, FilteredDisk} = proplists:split(Disk, proplists:get_keys(Cache)),
     Final = lists:sort(FilteredDisk ++ Cache),
     {reply, {ok, Final}, State};
-handle_call(flush, _From, #st{metric=Metric, data=Data, leveldb=LevelDB}=St) ->
-    Start = erlang:now(),
-    case flush_to_disk(Metric, Data, LevelDB) of
-        ok ->
-            Time = timer:now_diff(erlang:now(), Start),
-            Count = gb_sets:size(Data),
-            folsom_metrics:notify([avern, write_size], Count),
-            folsom_metrics:notify([avern, write_latency], Time),
-            folsom_metrics:notify([avern, successful_writes], Count),
-            {reply, ok, St#st{data=gb_sets:new(), last_flush=avern_util:now()}};
-        {error, Reason} ->
-            folsom_metrics:notify([avern, failed_writes], {inc, 1}),
-            {reply, {error, Reason}, St#st{data=Data}}
-    end;
-handle_call(Msg, _From, St) ->
-    {stop, {unknown_call, Msg}, error, St}.
+handle_call(Msg, _From, State) ->
+    {stop, {unknown_call, Msg}, error, State}.
 
-handle_cast({update, Timestamp, Value, Tags}, #st{data=Data}=St) ->
+handle_cast({update, Timestamp, Value, Tags}, #st{data=Data}=State) ->
     Data1 = gb_sets:add({{Timestamp, Tags}, Value}, Data),
-    {noreply, St#st{data=Data1}, 0};
-handle_cast(Msg, St) ->
-    {stop, {unknown_cast, Msg}, St}.
+    {noreply, State#st{data=Data1}};
+handle_cast(Msg, State) ->
+    {stop, {unknown_cast, Msg}, State}.
 
-handle_info(timeout, #st{data=Data, last_flush=LastFlush, metric=Metric}=St) ->
-    DeltaT = avern_util:now() - LastFlush,
-    avern_scheduler:schedule(Metric, gb_trees:size(Data), DeltaT),
-    {noreply, St};
-handle_info(Msg, St) ->
-    {stop, {unknown_info, Msg}, St}.
+handle_info(cleanup, State) ->
+    #st{
+        metric = Metric,
+        data = Data,
+        latest_flush = LF,
+        disk_window_size = DWS,
+        memory_window_size = MWS,
+        leveldb = LevelDB
+    } = State,
+    Until = avern_util:now() - DWS,
+    spawn_link(fun() -> avern_leveldb:delete(Metric, Until, LevelDB) end),
+    Data1 = cleanup_memory(MWS, LF, Data),
+    {ok, Period} = avern_scheduler:schedule(),
+    timer:send_after(Period, self(), cleanup),
+    {noreply, State#st{data=Data1}};
+handle_info(flush, State) ->
+    #st{
+        metric = Metric,
+        data = Data,
+        disk_window_size = DiskWindowSize,
+        leveldb = LevelDB
+    } = State,
+    Points = choose_writable_points(DiskWindowSize, Data),
+    case gb_sets:is_empty(Points) of
+        true -> ok;
+        false ->
+            spawn_link(fun() ->
+                exit(avern_leveldb:write(Metric, Points, LevelDB)) end
+            )
+    end,
+    {noreply, State};
+handle_info({'EXIT', _From, {_, T}}, #st{latest_flush=T0}=State) ->
+    {ok, Period} = avern_scheduler:schedule(),
+    timer:send_after(Period, self(), flush),
+    {noreply, State#st{latest_flush=max(T0, T)}};
+handle_info({'EXIT', _From, normal}, State) ->
+    {noreply, State};
+handle_info(Msg, State) ->
+    {stop, {unknown_info, Msg}, State}.
 
-terminate(_Reason, _St) ->
+terminate(_Reason, _State) ->
     ok.
 
-code_change(_OldVsn, St, _Extra) ->
-    {ok, St}.
-
--spec read_from_disk(binary(), pos_integer(), pos_integer(), any()) -> list().
-read_from_disk(Metric, From, To, LevelDB) ->
-    Ref = proplists:get_value(ref, LevelDB),
-    ReadOpts = proplists:get_value(read_opts, LevelDB),
-    ObjectKey = avern_encoding:encode_object_key(Metric, From, []),
-    Opts = [{first_key, ObjectKey}|ReadOpts],
-    Folder = fun({Key, EncodedValue}, Acc) ->
-        case avern_encoding:decode_object_key(Key) of
-            {ok, {Metric, Timestamp, Tags}} when Timestamp =< To ->
-                Value = avern_encoding:decode_object_value(EncodedValue),
-                [{{Metric, Timestamp, Tags}, Value}|Acc];
-            _ ->
-                throw({break, Acc})
-        end
-    end,
-    try
-        eleveldb:fold(Ref, Folder, [], Opts)
-    catch
-        {break, Acc} -> Acc
-    end.
-
-flush_to_disk(Metric, Data, LevelDB) ->
-    Operations = format_writes(Metric, Data),
-    Ref = proplists:get_value(ref, LevelDB),
-    WriteOpts = proplists:get_value(write_opts, LevelDB),
-    eleveldb:write(Ref, Operations, WriteOpts).
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
 
 read_from_cache(Metric, From, To, Data) ->
     Filtered = gb_sets:filter(
@@ -154,18 +158,25 @@ read_from_cache(Metric, From, To, Data) ->
         gb_sets:to_list(Filtered)
     ).
 
--spec format_writes(binary(), gb_set()) -> list().
-format_writes(Metric, Data) ->
-    format_writes(Metric, Data, []).
+-spec choose_writable_points(pos_integer(), gb_set()) -> gb_set().
+choose_writable_points(DiskWindowSize, Data) ->
+    EarliestTime = avern_util:now() - DiskWindowSize,
+    gb_sets:fold(
+        fun({{Timestamp, _}, _}=Point, Acc) when Timestamp >= EarliestTime ->
+            gb_sets:add(Point, Acc);
+           (_, Acc) ->
+            Acc
+        end,
+        gb_sets:new(),
+        Data
+    ).
 
--spec format_writes(binary(), gb_set(), list()) -> list().
-format_writes(Metric, Data, Operations) ->
-    case gb_sets:is_empty(Data) of
-        true ->
-            Operations;
-        false ->
-            {{{Timestamp, Tags}, Value}, Data1} = gb_sets:take_smallest(Data),
-            Key = avern_encoding:encode_object_key(Metric, Timestamp, Tags),
-            EncodedValue = avern_encoding:encode_object_value(Value),
-            format_writes(Metric, Data1, [{put, Key, EncodedValue}|Operations])
-    end.
+-spec cleanup_memory(pos_integer(), pos_integer(), gb_set()) -> gb_set().
+cleanup_memory(MemoryWindowSize, LatestFlush, Data) ->
+    DeleteUntil = min(LatestFlush, avern_util:now() - MemoryWindowSize),
+    gb_sets:filter(
+        fun({{Timestamp, _}, _}) ->
+            Timestamp >= DeleteUntil
+        end,
+        Data
+    ).

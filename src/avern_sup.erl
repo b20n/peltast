@@ -76,6 +76,6 @@ init_metrics() ->
     folsom_metrics:new_histogram([avern, write_latency]),
     folsom_metrics:new_histogram([avern, write_size]),
     folsom_metrics:new_meter([avern, incoming_metrics]),
-    folsom_metrics:new_meter([avern, successful_writes]),
-    folsom_metrics:new_counter([avern, failed_writes]),
+    folsom_metrics:new_counter([avern, successful_write_ops]),
+    folsom_metrics:new_counter([avern, failed_write_ops]),
     ok.

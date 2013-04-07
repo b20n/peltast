@@ -2,7 +2,8 @@
 -behaviour(gen_server).
 
 -export([
-    schedule/3
+    schedule/0,
+    update/2
 ]).
 -export([
     start_link/0,
@@ -15,71 +16,57 @@
 ]).
 
 -record(st, {
-    concurrency,
-    inflight,
-    queues
+    ewma,
+    current_period,
+    minimum_period,
+    tref
 }).
 
--spec schedule(binary(), integer(), integer()) -> ok.
-schedule(Metric, Count, DeltaT) ->
-    gen_server:cast(?MODULE, {schedule, Metric, Count, DeltaT}).
+-define(ALPHA, 1 - math:exp(-5 / 60)).
+
+-spec schedule() -> {ok, pos_integer()}.
+schedule() ->
+    gen_server:call(?MODULE, schedule).
+
+-spec update(pos_integer(), pos_integer()) -> ok.
+update(WriteCount, Duration) ->
+    gen_server:call(?MODULE, {update, WriteCount, Duration}).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
-    process_flag(trap_exit, true),
-    Queues = [{by_count, avern_pq:new()}, {by_time, avern_pq:new()}],
     {ok, #st{
-        concurrency = 1,
-        inflight = 0,
-        queues = Queues
+        ewma = 0,
+        current_period = 1000
     }}.
 
-handle_call(Msg, _From, St) ->
-    {stop, {unknown_call, Msg}, error, St}.
+handle_call(schedule, _From, State) ->
+    Period = round(State#st.current_period),
+    Period1 = Period + random:uniform(50),
+    {reply, {ok, Period1}, State};
+handle_call({update, WriteCount, Duration}, _From, State) ->
+    #st{
+        ewma = EWMA,
+        current_period = CP
+    } = State,
+    Current = WriteCount / Duration,
+    EWMA1 = EWMA + (?ALPHA * (Current - EWMA)),
+    io:format("Current: ~p, Old: ~p, New: ~p~n", [Current, EWMA, EWMA1]),
+    Delta = EWMA1 - EWMA,
+    Period = CP + Delta,
+    {reply, ok, State#st{ewma=EWMA1, current_period=Period}};
+handle_call(Msg, _From, State) ->
+    {stop, {unknown_call, Msg}, error, State}.
 
-handle_cast({schedule, Metric, Count, DeltaT}, #st{queues=Queues}=State) ->
-    Queues1 = lists:map(
-        fun({Type, Pq}) ->
-            case Type of
-                by_count -> {Type, avern_pq:push(Metric, Count, Pq)};
-                by_time -> {Type, avern_pq:push(Metric, DeltaT, Pq)}
-            end
-        end,
-        Queues
-    ),
-    {noreply, State#st{queues=Queues1}, 0};
-handle_cast(Msg, St) ->
-    {stop, {unknown_cast, Msg}, St}.
+handle_cast(Msg, State) ->
+    {stop, {unknown_cast, Msg}, State}.
 
-handle_info(timeout, #st{queues=Q, inflight=I, concurrency=C}=State) ->
-    {Q1, I1} = maybe_schedule_flush(Q, I, C),
-    {noreply, State#st{queues=Q1, inflight=I1}};
-handle_info({'EXIT', _From, _Reason}, #st{inflight=I}=State) ->
-    {noreply, State#st{inflight=I-1}, 0};
-handle_info(Msg, St) ->
-    {stop, {unknown_info, Msg}, St}.
+handle_info(Msg, State) ->
+    {stop, {unknown_info, Msg}, State}.
 
-terminate(_Reason, _St) ->
+terminate(_Reason, _State) ->
     ok.
 
-code_change(_OldVsn, St, _Extra) ->
-    {ok, St}.
-
--spec maybe_schedule_flush(list(), integer(), integer()) -> {list(), integer()}.
-maybe_schedule_flush(Q, I, C) when I >= C ->
-    {Q, I};
-maybe_schedule_flush([{Type, Pq}|Rest]=Q, I, C) ->
-    case avern_pq:pop(Pq) of
-        {undefined, _} ->
-            {Q, I};
-        {Metric, Pq1} ->
-            spawn_link(avern_queue, flush, [Metric]),
-            Rest1 = lists:map(
-                fun({T, P}) -> {T, avern_pq:delete(Metric, P)} end,
-                Rest
-            ),
-            maybe_schedule_flush(Rest1 ++ [{Type, Pq1}], I + 1, C)
-    end.
-
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
