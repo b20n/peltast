@@ -65,9 +65,8 @@ start_link(LevelDB, Metric, DiskWindowSize, MemoryWindowSize) ->
 init({LevelDB, Metric, DiskWindowSize, MemoryWindowSize}) ->
     gproc:reg({n, l, Metric}, ignored),
     process_flag(trap_exit, true),
-    {ok, Period} = avern_scheduler:schedule(),
-    timer:send_after(Period, self(), cleanup),
-    timer:send_after(Period, self(), flush),
+    avern_scheduler:schedule(self(), flush),
+    avern_scheduler:schedule(self(), cleanup),
     Data = gb_sets:new(),
     {ok, #st{
         metric = Metric,
@@ -110,8 +109,6 @@ handle_info(cleanup, State) ->
     Until = avern_util:now() - DWS,
     spawn_link(fun() -> avern_leveldb:delete(Metric, Until, LevelDB) end),
     Data1 = cleanup_memory(MWS, LF, Data),
-    {ok, Period} = avern_scheduler:schedule(),
-    timer:send_after(Period, self(), cleanup),
     {noreply, State#st{data=Data1}};
 handle_info(flush, State) ->
     #st{
@@ -121,19 +118,13 @@ handle_info(flush, State) ->
         leveldb = LevelDB
     } = State,
     Points = choose_writable_points(DiskWindowSize, Data),
-    case gb_sets:is_empty(Points) of
-        true -> ok;
-        false ->
-            spawn_link(fun() ->
-                exit(avern_leveldb:write(Metric, Points, LevelDB)) end
-            )
-    end,
+    spawn_link(fun() -> exit(avern_leveldb:write(Metric, Points, LevelDB)) end),
     {noreply, State};
 handle_info({'EXIT', _From, {_, T}}, #st{latest_flush=T0}=State) ->
-    {ok, Period} = avern_scheduler:schedule(),
-    timer:send_after(Period, self(), flush),
+    avern_scheduler:schedule(self(), flush),
     {noreply, State#st{latest_flush=max(T0, T)}};
 handle_info({'EXIT', _From, normal}, State) ->
+    avern_scheduler:schedule(self(), cleanup),
     {noreply, State};
 handle_info(Msg, State) ->
     {stop, {unknown_info, Msg}, State}.

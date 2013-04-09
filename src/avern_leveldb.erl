@@ -50,7 +50,6 @@ read(Metric, From, To, LevelDB) ->
 
 -spec write(binary(), gb_set(), list()) -> {ok, pos_integer()} | {error, any()}.
 write(Metric, Data, LevelDB) ->
-
     Operations = format_writes(Metric, Data),
     Ref = proplists:get_value(ref, LevelDB),
     WriteOpts = proplists:get_value(write_opts, LevelDB),
@@ -58,7 +57,7 @@ write(Metric, Data, LevelDB) ->
         ok ->
             {{{LatestTime, _}, _}, _} = gb_sets:take_largest(Data),
             {ok, LatestTime};
-        error ->
+        {error, _Reason} ->
             {error, 0}
     end.
 
@@ -81,7 +80,7 @@ format_writes(Metric, Data, Operations) ->
 
 
 do_write(_, [], _) ->
-    ok;
+    {error, empty};
 do_write(Ref, Operations, Opts) ->
     Start = erlang:now(),
     case eleveldb:write(Ref, Operations, Opts) of
@@ -91,10 +90,9 @@ do_write(Ref, Operations, Opts) ->
             folsom_metrics:notify([avern, write_size], Count),
             folsom_metrics:notify([avern, write_latency], Time),
             folsom_metrics:notify([avern, successful_write_ops], {inc, 1}),
-            avern_scheduler:update(Count, Time),
             ok;
-        {error, _Reason} ->
+        {error, Reason} ->
             %% TODO: logme
             folsom_metrics:notify([avern, failed_write_ops], {inc, 1}),
-            error
+            {error, Reason}
     end.

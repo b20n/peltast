@@ -2,8 +2,8 @@
 -behaviour(gen_server).
 
 -export([
-    schedule/0,
-    update/2
+    schedule/2,
+    set_wps/1
 ]).
 -export([
     start_link/0,
@@ -16,52 +16,46 @@
 ]).
 
 -record(st, {
-    ewma,
-    current_period,
-    minimum_period,
+    waiting,
+    wps,
     tref
 }).
 
--define(ALPHA, 1 - math:exp(-5 / 60)).
+schedule(Pid, Msg) ->
+    gen_server:cast(?MODULE, {schedule, Pid, Msg}).
 
--spec schedule() -> {ok, pos_integer()}.
-schedule() ->
-    gen_server:call(?MODULE, schedule).
-
--spec update(pos_integer(), pos_integer()) -> ok.
-update(WriteCount, Duration) ->
-    gen_server:call(?MODULE, {update, WriteCount, Duration}).
+set_wps(N) ->
+    gen_server:call(?MODULE, {set_wps, N}).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
+    {ok, Tref} = timer:send_interval(1000, self(), execute),
     {ok, #st{
-        ewma = 0,
-        current_period = 1000
+        waiting = queue:new(),
+        wps = 20,
+        tref = Tref
     }}.
 
-handle_call(schedule, _From, State) ->
-    Period = round(State#st.current_period),
-    Period1 = Period + random:uniform(50),
-    {reply, {ok, Period1}, State};
-handle_call({update, WriteCount, Duration}, _From, State) ->
-    #st{
-        ewma = EWMA,
-        current_period = CP
-    } = State,
-    Current = WriteCount / Duration,
-    EWMA1 = EWMA + (?ALPHA * (Current - EWMA)),
-    io:format("Current: ~p, Old: ~p, New: ~p~n", [Current, EWMA, EWMA1]),
-    Delta = EWMA1 - EWMA,
-    Period = CP + Delta,
-    {reply, ok, State#st{ewma=EWMA1, current_period=Period}};
+handle_call({set_wps, WPS}, _From, State) ->
+    {reply, ok, State#st{wps=WPS}};
 handle_call(Msg, _From, State) ->
     {stop, {unknown_call, Msg}, error, State}.
 
+handle_cast({schedule, Pid, Msg}, #st{waiting=W}=State) ->
+    %% {{value, {Pid1, Msg1}}, W2} = queue:out(W1),
+    %% Pid1 ! Msg1,
+    {noreply, State#st{waiting=queue:in({Pid, Msg}, W)}};
 handle_cast(Msg, State) ->
     {stop, {unknown_cast, Msg}, State}.
 
+handle_info(execute, #st{waiting=W, wps=WPS}=State) ->
+    Gap = trunc(1000 / WPS),
+    Times = [Gap * N || N <- lists:seq(1, WPS)],
+    {Items, W1} = out_n(WPS, W),
+    [timer:send_after(T, P, M) || {P, M} <- Items, T <- Times],
+    {noreply, State#st{waiting=W1}};
 handle_info(Msg, State) ->
     {stop, {unknown_info, Msg}, State}.
 
@@ -70,3 +64,16 @@ terminate(_Reason, _State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+out_n(N, Q) ->
+    out_n(N, Q, []).
+
+out_n(0, Q, Acc) ->
+    {Acc, Q};
+out_n(N, Q, Acc) ->
+    case queue:out(Q) of
+        {{value, I}, Q1} ->
+            out_n(N-1, Q1, [I|Acc]);
+        {empty, Q1} ->
+            out_n(0, Q1, Acc)
+    end.
