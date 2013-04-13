@@ -21,14 +21,12 @@
 
 -record(st, {
     metric,
-    data,
-    latest_flush,
-    disk_window_size,
+    memory,
+    disk,
     memory_window_size,
+    disk_window_size,
     leveldb
 }).
-
-%% TODO: check if queries can be served entirely from RAM before hitting disk
 
 -spec update(binary(), pos_integer(), number(), tags()) -> ok.
 update(Metric, Timestamp, Value, Tags) ->
@@ -65,67 +63,66 @@ start_link(LevelDB, Metric, DiskWindowSize, MemoryWindowSize) ->
 init({LevelDB, Metric, DiskWindowSize, MemoryWindowSize}) ->
     gproc:reg({n, l, Metric}, ignored),
     process_flag(trap_exit, true),
-    avern_scheduler:schedule(self(), flush),
-    avern_scheduler:schedule(self(), cleanup),
-    Data = gb_sets:new(),
+    avern_scheduler:register(self()),
     {ok, #st{
         metric = Metric,
-        data = Data,
-        latest_flush = 0,
-        disk_window_size = DiskWindowSize,
+        memory = gb_sets:new(),
+        disk = gb_sets:new(),
         memory_window_size = MemoryWindowSize,
+        disk_window_size = DiskWindowSize,
         leveldb = LevelDB
     }}.
 
+handle_call(get_state, _From, State) ->
+    {reply, {ok, State}, State};
 handle_call({read, From, To}, _From, State) ->
     #st{
         metric = Metric,
-        data = Data,
+        memory = Mem,
+        disk = Disk,
         leveldb = LevelDB
     } = State,
-    Disk = avern_leveldb:read(Metric, From, To, LevelDB),
-    Cache = read_from_cache(Metric, From, To, Data),
-    {_, FilteredDisk} = proplists:split(Disk, proplists:get_keys(Cache)),
-    Final = lists:sort(FilteredDisk ++ Cache),
+    Cached = read_from_cache(Metric, From, To, gb_sets:union(Mem, Disk)),
+    Final = case Cached of
+        % TODO: fudge factor on timing
+        [{{_, Timestamp, _}, _}|_] when Timestamp > From ->
+            Disked = avern_leveldb:read(Metric, From, Timestamp, LevelDB),
+            {_, Filtered} = proplists:split(Disked, proplists:get_keys(Cached)),
+            lists:sort(Filtered ++ Cached);
+        [] ->
+            Disked = avern_leveldb:read(Metric, From, To, LevelDB),
+            {_, Filtered} = proplists:split(Disked, proplists:get_keys(Cached)),
+            lists:sort(Filtered ++ Cached);
+        _ ->
+            Cached
+    end,
     {reply, {ok, Final}, State};
 handle_call(Msg, _From, State) ->
     {stop, {unknown_call, Msg}, error, State}.
 
-handle_cast({update, Timestamp, Value, Tags}, #st{data=Data}=State) ->
-    Data1 = gb_sets:add({{Timestamp, Tags}, Value}, Data),
-    {noreply, State#st{data=Data1}};
+handle_cast({update, Timestamp, Value, Tags}, #st{disk=Disk}=State) ->
+    Disk1 = gb_sets:add({{Timestamp, Tags}, Value}, Disk),
+    {noreply, State#st{disk=Disk1}};
 handle_cast(Msg, State) ->
     {stop, {unknown_cast, Msg}, State}.
 
-handle_info(cleanup, State) ->
-    #st{
-        metric = Metric,
-        data = Data,
-        latest_flush = LF,
-        disk_window_size = DWS,
-        memory_window_size = MWS,
-        leveldb = LevelDB
-    } = State,
-    Until = avern_util:now() - DWS,
-    spawn_link(fun() -> avern_leveldb:delete(Metric, Until, LevelDB) end),
-    Data1 = cleanup_memory(MWS, LF, Data),
-    {noreply, State#st{data=Data1}};
 handle_info(flush, State) ->
     #st{
         metric = Metric,
-        data = Data,
+        disk = Disk,
         disk_window_size = DiskWindowSize,
         leveldb = LevelDB
     } = State,
-    Points = choose_writable_points(DiskWindowSize, Data),
-    spawn_link(fun() -> exit(avern_leveldb:write(Metric, Points, LevelDB)) end),
+    spawn_link(fun() -> exit(flush(Metric, Disk, DiskWindowSize, LevelDB)) end),
     {noreply, State};
-handle_info({'EXIT', _From, {_, T}}, #st{latest_flush=T0}=State) ->
-    avern_scheduler:schedule(self(), flush),
-    {noreply, State#st{latest_flush=max(T0, T)}};
-handle_info({'EXIT', _From, normal}, State) ->
-    avern_scheduler:schedule(self(), cleanup),
-    {noreply, State};
+handle_info({'EXIT', _From, {_, LatestFlush}}, State) ->
+    #st{
+        memory = Mem,
+        disk = Disk,
+        memory_window_size = MemoryWindowSize
+    } = State,
+    {Mem1, Disk1} = shuffle_queues(MemoryWindowSize, LatestFlush, Mem, Disk),
+    {noreply, State#st{memory=Mem1, disk=Disk1}};
 handle_info(Msg, State) ->
     {stop, {unknown_info, Msg}, State}.
 
@@ -136,38 +133,84 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 read_from_cache(Metric, From, To, Data) ->
-    Filtered = gb_sets:filter(
-        fun({{Timestamp, _}, _}) ->
-            Timestamp >= From andalso Timestamp =< To
-        end,
-        Data
-    ),
-    lists:map(
-        fun({{Timestamp, Tags}, Value}) ->
-            {{Metric, Timestamp, Tags}, Value}
-        end,
-        gb_sets:to_list(Filtered)
-    ).
+    read_from_cache(Metric, From, To, Data, []).
 
--spec choose_writable_points(pos_integer(), gb_set()) -> gb_set().
+read_from_cache(Metric, From, To, Data, Acc) ->
+    try gb_sets:take_smallest(Data) of
+        {{{Timestamp, _}, _}, Data1} when Timestamp < From ->
+            read_from_cache(Metric, From, To, Data1, Acc);
+        {{{Timestamp, _}, _}, _} when Timestamp > To ->
+            Acc;
+        {{{Timestamp, Tags}, Value}, Data1} ->
+            Acc1 = [{{Metric, Timestamp, Tags}, Value}|Acc],
+            read_from_cache(Metric, From, To, Data1, Acc1)
+    catch
+        error:function_clause ->
+            Acc
+    end.
+
+
+-spec flush(binary(), gb_set(), pos_integer(), list()) ->
+  {ok, pos_integer()} | {error, 0}.
+flush(Metric, Data, DiskWindowSize, LevelDB) ->
+    KeepUntil = avern_util:now() - DiskWindowSize,
+    avern_leveldb:delete(Metric, KeepUntil, LevelDB),
+    PointsToWrite = choose_writable_points(DiskWindowSize, Data),
+    BinaryPoints = encode_writable_points(Metric, PointsToWrite),
+    case avern_leveldb:write(BinaryPoints, LevelDB) of
+        ok ->
+            {{{LatestTime, _}, _}, _} = gb_sets:take_largest(Data),
+            {ok, LatestTime};
+        {error, _Reason} ->
+            {error, 0}
+    end.
+
+% TODO: rewrite this with an iteration via take_largest
+-spec choose_writable_points(pos_integer(), gb_set()) -> list().
 choose_writable_points(DiskWindowSize, Data) ->
     EarliestTime = avern_util:now() - DiskWindowSize,
     gb_sets:fold(
         fun({{Timestamp, _}, _}=Point, Acc) when Timestamp >= EarliestTime ->
-            gb_sets:add(Point, Acc);
+            [Point|Acc];
            (_, Acc) ->
             Acc
         end,
-        gb_sets:new(),
+        [],
         Data
     ).
 
--spec cleanup_memory(pos_integer(), pos_integer(), gb_set()) -> gb_set().
-cleanup_memory(MemoryWindowSize, LatestFlush, Data) ->
-    DeleteUntil = min(LatestFlush, avern_util:now() - MemoryWindowSize),
-    gb_sets:filter(
-        fun({{Timestamp, _}, _}) ->
-            Timestamp >= DeleteUntil
-        end,
-        Data
-    ).
+-spec encode_writable_points(binary(), list()) -> list().
+encode_writable_points(Metric, Points) ->
+    encode_writable_points(Metric, Points, []).
+
+-spec encode_writable_points(binary(), list(), list()) -> list().
+encode_writable_points(_, [], Encoded) ->
+    Encoded;
+encode_writable_points(Metric, [{{Timestamp, Tags}, Value}|Points], Encoded) ->
+    Key = avern_encoding:encode_object_key(Metric, Timestamp, Tags),
+    EncodedValue = avern_encoding:encode_object_value(Value),
+    encode_writable_points(Metric, Points, [{Key, EncodedValue}|Encoded]).
+
+-spec shuffle_queues(integer(), integer(), gb_set(), gb_set()) -> {gb_set(), gb_set()}.
+shuffle_queues(MemoryWindowSize, LatestFlush, Mem, Disk) ->
+    {Disk1, ToShuffle} = drop_until(LatestFlush, Disk),
+    Mem1 = gb_sets:union(Mem, gb_sets:from_list(ToShuffle)),
+    {Mem2, _} = drop_until(avern_util:now() - MemoryWindowSize, Mem1),
+    {Mem2, Disk1}.
+
+-spec drop_until(pos_integer(), gb_set()) -> {gb_set(), list()}.
+drop_until(Timestamp, Set) ->
+    drop_until(Timestamp, Set, []).
+
+
+-spec drop_until(pos_integer(), gb_set(), list()) -> {gb_set(), list()}.
+drop_until(Timestamp, Set, Dropped) ->
+    try gb_sets:take_smallest(Set) of
+        {{{T, _}, _}=Item, Set1} when T =< Timestamp ->
+            drop_until(Timestamp, Set1, [Item|Dropped]);
+        _ ->
+            {Set, Dropped}
+    catch
+        error:function_clause ->
+            {Set, Dropped}
+    end.

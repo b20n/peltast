@@ -3,10 +3,10 @@
 -export([
     delete/3,
     read/4,
-    write/3
+    write/2
 ]).
 
--spec delete(binary(), pos_integer, list()) -> any().
+-spec delete(binary(), number(), list()) -> any().
 delete(Metric, Until, LevelDB) ->
     Ref = proplists:get_value(ref, LevelDB),
     ReadOpts = proplists:get_value(read_opts, LevelDB),
@@ -25,7 +25,8 @@ delete(Metric, Until, LevelDB) ->
     catch
         {break, Acc} -> Acc
     end,
-    do_write(Ref, Deletes, proplists:get_value(write_opts, LevelDB)).
+    WriteOpts = proplists:get_value(write_opts, LevelDB),
+    do_write(Ref, Deletes, WriteOpts).
 
 -spec read(binary(), pos_integer(), pos_integer(), list()) -> list().
 read(Metric, From, To, LevelDB) ->
@@ -48,36 +49,22 @@ read(Metric, From, To, LevelDB) ->
         {break, Acc} -> Acc
     end.
 
--spec write(binary(), gb_set(), list()) -> {ok, pos_integer()} | {error, any()}.
-write(Metric, Data, LevelDB) ->
-    Operations = format_writes(Metric, Data),
+-spec write(list(), list()) -> ok | {error, any()}.
+write(Data, LevelDB) ->
+    Operations = format_write_operations(Data),
     Ref = proplists:get_value(ref, LevelDB),
     WriteOpts = proplists:get_value(write_opts, LevelDB),
-    case do_write(Ref, Operations, WriteOpts) of
-        ok ->
-            {{{LatestTime, _}, _}, _} = gb_sets:take_largest(Data),
-            {ok, LatestTime};
-        {error, _Reason} ->
-            {error, 0}
-    end.
+    do_write(Ref, Operations, WriteOpts).
 
+-spec format_write_operations(list()) -> list().
+format_write_operations(Data) ->
+    format_write_operations(Data, []).
 
--spec format_writes(binary(), gb_set()) -> list().
-format_writes(Metric, Data) ->
-    format_writes(Metric, Data, []).
-
--spec format_writes(binary(), gb_set(), list()) -> list().
-format_writes(Metric, Data, Operations) ->
-    case gb_sets:is_empty(Data) of
-        true ->
-            Operations;
-        false ->
-            {{{Timestamp, Tags}, Value}, Data1} = gb_sets:take_smallest(Data),
-            Key = avern_encoding:encode_object_key(Metric, Timestamp, Tags),
-            EncodedValue = avern_encoding:encode_object_value(Value),
-            format_writes(Metric, Data1, [{put, Key, EncodedValue}|Operations])
-    end.
-
+-spec format_write_operations(list(), list()) -> list().
+format_write_operations([], Operations) ->
+    Operations;
+format_write_operations([{Key, Value}|Data], Operations) ->
+    format_write_operations(Data, [{put, Key, Value}|Operations]).
 
 do_write(_, [], _) ->
     {error, empty};
