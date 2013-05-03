@@ -74,12 +74,11 @@ do_write(Ref, Operations, Opts) ->
         ok ->
             Time = timer:now_diff(erlang:now(), Start),
             Count = length(Operations),
-            folsom_metrics:notify([avern, write_size], Count),
-            folsom_metrics:notify([avern, write_latency], Time),
-            folsom_metrics:notify([avern, successful_write_ops], {inc, 1}),
+            graf:update_histogram([avern, write_size], Count),
+            graf:update_histogram([avern, write_latency], Time),
+            graf:increment_counter([avern, successful_write_ops]),
             ok;
         {error, Reason} ->
-            %% TODO: logme
-            folsom_metrics:notify([avern, failed_write_ops], {inc, 1}),
+            graf:increment_counter([avern, failed_write_ops]),
             {error, Reason}
     end.

@@ -39,6 +39,8 @@ init([]) ->
         tref = Tref
     }}.
 
+handle_call(get_state, _From, State) ->
+    {reply, {ok, State}, State};
 handle_call({set_wps, WPS}, _From, State) ->
     {reply, ok, State#st{wps=WPS}};
 handle_call(Msg, _From, State) ->

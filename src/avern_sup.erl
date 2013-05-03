@@ -7,7 +7,15 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    init_metrics(),
+    % Queues
+    DiskWindowSize = case application:get_env(avern, disk_window) of
+        {ok, DWS} -> DWS;
+        undefined -> 86400
+    end,
+    MemoryWindowSize = case application:get_env(avern, memory_window) of
+        {ok, MWS} -> MWS;
+        undefined -> 0
+    end,
     % Webmachine
     WebIP = case application:get_env(avern, web_ip) of
         {ok, IP} -> IP;
@@ -48,13 +56,18 @@ init([]) ->
     end,
     case eleveldb:open(DataDir, OpenOpts) of
         {ok, Ref} ->
-            Args = [{ref, Ref}, {read_opts, ReadOpts}, {write_opts, WriteOpts}],
+            LevelDB = [
+                {ref, Ref},
+                {read_opts, ReadOpts},
+                {write_opts, WriteOpts}
+            ],
+            QueueSupArgs = [DiskWindowSize, MemoryWindowSize, LevelDB],
             {ok, {{one_for_one, 5, 10}, [
                 {avern_queue_sup,
-                    {avern_queue_sup, start_link, [Args]},
+                    {avern_queue_sup, start_link, [QueueSupArgs]},
                     permanent, infinity, supervisor, [avern_queue_sup]},
                 {avern_encoding,
-                    {avern_encoding, start_link, [Args]},
+                    {avern_encoding, start_link, [LevelDB]},
                     permanent, 5000, worker, [avern_encoding]},
                 {avern_udp,
                     {avern_udp, start_link, []},
@@ -70,12 +83,3 @@ init([]) ->
             io:format("Failed to open LevelDB: ~p~n", [Else]),
             {error, Else}
     end.
-
-init_metrics() ->
-    folsom_metrics:new_histogram([avern, metric_decode_time]),
-    folsom_metrics:new_histogram([avern, write_latency]),
-    folsom_metrics:new_histogram([avern, write_size]),
-    folsom_metrics:new_meter([avern, incoming_metrics]),
-    folsom_metrics:new_counter([avern, successful_write_ops]),
-    folsom_metrics:new_counter([avern, failed_write_ops]),
-    ok.

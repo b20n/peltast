@@ -29,8 +29,8 @@ init([]) ->
     end.
 
 loop(Socket, Buf, N) when N >= ?PROCESSING_BUFSIZE ->
-    % TODO: instrument me
     spawn(avern_worker, process, [Buf]),
+    graf:increment_counter([avern, metrics_received], ?PROCESSING_BUFSIZE),
     loop(Socket, [], 0);
 loop(Socket, Buf, N) ->
     case gen_udp:recv(Socket, ?MAX_LENGTH, 1000) of

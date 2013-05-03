@@ -73,6 +73,8 @@ init(LevelDB) ->
         leveldb = LevelDB
     }}.
 
+handle_call(get_state, _From, State) ->
+    {reply, {ok, State}, State};
 handle_call({encode, Type, Value}, _From, #st{leveldb=LevelDB}=St) ->
     Ref = proplists:get_value(ref, LevelDB),
     ReadOpts = proplists:get_value(read_opts, LevelDB),

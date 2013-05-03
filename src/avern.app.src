@@ -13,7 +13,7 @@
         crypto,
         mochiweb,
         webmachine,
-        folsom
+        graf
     ]},
     {mod, {avern_app, []}},
     {env, []}

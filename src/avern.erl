@@ -8,5 +8,5 @@ start() ->
     application:start(mochiweb),
     application:start(webmachine),
     application:start(gproc),
-    application:start(folsom),
+    application:start(graf),
     application:start(avern).
